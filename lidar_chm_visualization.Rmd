@@ -1,0 +1,153 @@
+---
+title: "LiDAR CHM Visualization"
+author: "Conor McMahon"
+date: "11/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(raster)
+library(rgdal)
+library(here)
+
+```
+
+First, load the two LiDAR canopy height models and display them for visual comparison:
+
+```{r, echo=FALSE, warning=FALSE}
+
+pre_drought_chm <- raster(here::here("data","chm_mosaic_2014.tif"))
+post_drought_chm <- raster(here::here("data","chm_mosaic_2018.tif"))
+
+plot(pre_drought_chm, zlim=c(0,30))
+plot(post_drought_chm, zlim=c(0,30))
+
+```
+
+Next, aggregate to five meters and mask both images to the same extent, then compare changes:
+
+```{r, echo=FALSE, warning=FALSE}
+
+source(here::here("aggregate_custom.R"))
+
+# Aggregate up to 5m resolution
+crs(pre_drought_chm) <- crs("+init=epsg:32611")
+pre_drought_chm_5m <- aggregate(pre_drought_chm, fact=5, fun=mean)
+post_drought_chm_5m <- aggregate_custom(post_drought_chm, pre_drought_chm_5m)
+
+pre_drought_mask <- pre_drought_chm_5m != 0
+post_drought_mask <- post_drought_chm_5m != 0
+
+# plot(pre_drought_chm_5m)
+# plot(post_drought_chm_5m)
+# plot(pre_drought_mask)
+# plot(post_drought_mask)
+
+# Get Change in CHM from 2014 to 2018
+drought_change <- (post_drought_chm_5m - pre_drought_chm_5m) * pre_drought_mask * post_drought_mask
+drought_change[drought_change == 0] <- NA
+plot(drought_change, zlim=c(-10,10))
+
+# Crop scenes to match same extent
+drought_change <- crop(drought_change, pre_drought_chm_5m)
+pre_drought_chm_5m <- crop(pre_drought_chm_5m, drought_change)
+
+pre_drought_chm_df <- as.data.frame(pre_drought_chm_5m, xy=TRUE)
+names(pre_drought_chm_df) <- c("x", "y", "chm_init")
+drought_change_df <- as.data.frame(drought_change, xy=TRUE)
+names(drought_change_df) <- c("x", "y","chm_change")
+drought_change_df$chm_init <- pre_drought_chm_df$chm_init
+
+ggplot(drought_change_df) + 
+  geom_histogram(aes(x=chm_change))
+
+```
+
+Compare change between sites
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+
+woodland <- readOGR(here::here("boundaries","east_grove.shp"))
+channel <- readOGR(here::here("boundaries","channel.shp"))
+
+channel_change <- mask(drought_change, channel)
+woodland_change <- mask(drought_change, woodland)
+
+writeRaster(channel_change, here::here("outputs","channel_change"), overwrite=TRUE)
+writeRaster(woodland_change, here::here("outputs","woodland_change"), overwrite=TRUE)
+
+channel_change_df <- as.data.frame(channel_change, xy=TRUE) %>%
+  drop_na() %>%
+  mutate(scene = rep("channel", n()))
+woodland_change_df <- as.data.frame(woodland_change, xy=TRUE) %>%
+  drop_na() %>%
+  mutate(scene = rep("woodland", n()))
+change_df <- rbind(channel_change_df, woodland_change_df)
+
+ggplot(change_df) + 
+  geom_histogram(aes(x=layer, group=scene, col=scene), bins=100) + 
+  scale_x_continuous(limits=c(-30,15)) + 
+  scale_y_log10()
+
+
+```
+
+
+Interested in comapring histograms across time...
+
+
+```{r}
+
+# Load the two datasets
+histogram_2014 <- stack(here::here("outputs","histogram_2014_mosaic.tif"))
+histogram_2018 <- stack(here::here("outputs","histogram_2018_mosaic.tif"))
+# Crop to same extent
+histogram_2014 <- crop(histogram_2014, histogram_2018)
+histogram_2018 <- crop(histogram_2018, histogram_2014)
+# Mask to remove values which are empty in one raster
+mask_2014 <- 1-is.na(histogram_2014[[1]])
+mask_2018 <- 1-is.na(histogram_2018[[1]])
+mask_overall <- mask_2014*mask_2018
+histogram_2014 <- histogram_2014*mask_overall
+histogram_2018 <- histogram_2018*mask_overall
+
+# Combine histogram values to one image (first two bands relate to min/max of histogram range...)
+histograms_combined <- stack(histogram_2014[[3:22]], histogram_2018[[3:22]])
+
+# Sourced code for this part from obrl_soil answer at https://gis.stackexchange.com/questions/279535/pixel-correlations-from-two-raster-datasets-in-r
+
+# Function to generate correlation between 20 initial and 20 following values for a given pixel
+corvec <- function(vec = NULL) {
+  cor(
+    # first LiDAR histogram (2014)
+    x      = vec[1:(length(vec)/2)],
+    # second LiDAR histogram (2018)
+    y      = vec[((length(vec)/2) + 1):length(vec)],
+    use    = 'complete.obs',
+    method = 'spearman'
+  )
+}
+
+# Run the above function for each cell in the raster
+histogram_correlation <- calc(
+  histograms_combined,
+  fun = function(x) {
+    # skip all areas where at least one band in the cell is NA in at least one of the images
+    if (sum(is.na(x)) > 0) {
+      NA_real_
+    } else {
+      corvec(vec = x)
+    }
+  }
+)
+
+plot(corlyrs, zlim=c(0,1))
+
+writeRaster(histogram_correlation, here::here("outputs","histogram_correlation.tif"))
+
+```
