@@ -12,15 +12,49 @@ library(tidyverse)
 library(raster)
 library(rgdal)
 library(here)
+library(rasterKernelEstimates)
 
 ```
 
-First, load the two LiDAR canopy height models and display them for visual comparison:
+First, load the two LiDAR canopy height models and display them for visual comparison, after running a filter to remove powerlines:
 
-```{r, echo=FALSE, warning=FALSE}
+First dataset information:
+- first flight on October 18, 2015 the second on October 19, 2015, and a short final mission was flown on October 20, 2015
+- 1 km wide, 125 km long, about 136 km^3 total area
+- 10 to 45 pts/m^2
+Second dataset information:
+- flights from 05/27/2018 - 07/22/2018
+- about 7423 km^2
+- 5.92 pts/m^3
 
-pre_drought_chm <- raster(here::here("data","chm_mosaic_2014.tif"))
+```{r load_filter_chms, echo=FALSE, warning=FALSE}
+
+pre_drought_chm <- raster(here::here("data","chm_mosaic_2015.tif"))
 post_drought_chm <- raster(here::here("data","chm_mosaic_2018.tif"))
+
+# Filter to remove power lines
+#    get PERCENTILEth percentile of heights among neighbors to each pixel
+#    assign NA to pixels which have height more than HEIGHT_THRESHOLD above the PERCENTILEth percentile in neighbors
+#    neighbors are all points within KERNEL_HALFWIDTH cells (including along diagonals) except target point
+filterPowerLines <- function(input_raster, kernel_halfwidth, percentile, height_threshold)
+{
+  # Weights matrix is for 24 nearest neighbors
+  kernel_width <- (kernel_halfwidth*2+1)
+  weights <- matrix(1,nrow=kernel_width, ncol=kernel_width)
+  weights[kernel_halfwidth+1,kernel_halfwidth+1] <- 0
+  run.time <- proc.time()
+  kernel_percentiles <- rasterLocalQuantiles(input_raster,weights,q=percentile)
+  
+  powerline_mask <- (input_raster - kernel_percentiles) > height_threshold
+  
+  return(mask(input_raster, powerline_mask, maskvalue=1, updatevalue=NA))
+}
+
+# Here, using 70th percentile, kernels 25 pixels on a side (25 m), and a height threshold of 10
+pre_drought_chm <- filterPowerLines(pre_drought_chm, 12, 70, 10)
+writeRaster(pre_drought_chm, here::here("outputs","chm_mosaic_2015_filtered.tif"), overwrite=TRUE)
+post_drought_chm <- filterPowerLines(post_drought_chm, 12, 70, 10)
+writeRaster(post_drought_chm, here::here("outputs","chm_mosaic_2018_filtered.tif"), overwrite=TRUE)
 
 plot(pre_drought_chm, zlim=c(0,30))
 plot(post_drought_chm, zlim=c(0,30))
@@ -29,7 +63,7 @@ plot(post_drought_chm, zlim=c(0,30))
 
 Next, aggregate to five meters and mask both images to the same extent, then compare changes:
 
-```{r, echo=FALSE, warning=FALSE}
+```{r aggregate_mask_change_detection, echo=FALSE, warning=FALSE}
 
 source(here::here("aggregate_custom.R"))
 
@@ -46,7 +80,7 @@ post_drought_mask <- post_drought_chm_5m != 0
 # plot(pre_drought_mask)
 # plot(post_drought_mask)
 
-# Get Change in CHM from 2014 to 2018
+# Get Change in CHM from 2015 to 2018
 drought_change <- (post_drought_chm_5m - pre_drought_chm_5m) * pre_drought_mask * post_drought_mask
 drought_change[drought_change == 0] <- NA
 plot(drought_change, zlim=c(-10,10))
@@ -70,10 +104,10 @@ Compare change between sites
 
 
 
-```{r, echo=FALSE, warning=FALSE}
+```{r site_level_change, echo=FALSE, warning=FALSE}
 
-woodland <- readOGR(here::here("boundaries","east_grove.shp"))
-channel <- readOGR(here::here("boundaries","channel.shp"))
+woodland <- readOGR(here::here("boundaries","east_grove_woodland.shp"))
+channel <- readOGR(here::here("boundaries","channel_SCR.shp"))
 
 channel_change <- mask(drought_change, channel)
 woodland_change <- mask(drought_change, woodland)
@@ -101,30 +135,30 @@ ggplot(change_df) +
 Interested in comapring histograms across time...
 
 
-```{r}
+```{r histogram_correlations, warning=FALSE}
 
 # Load the two datasets
-histogram_2014 <- stack(here::here("outputs","histogram_2014_mosaic.tif"))
+histogram_2015 <- stack(here::here("outputs","histogram_2015_mosaic.tif"))
 histogram_2018 <- stack(here::here("outputs","histogram_2018_mosaic.tif"))
 # Crop to same extent
-histogram_2014 <- crop(histogram_2014, histogram_2018)
-histogram_2018 <- crop(histogram_2018, histogram_2014)
+histogram_2015 <- crop(histogram_2015, histogram_2018)
+histogram_2018 <- crop(histogram_2018, histogram_2015)
 # Mask to remove values which are empty in one raster
-mask_2014 <- 1-is.na(histogram_2014[[1]])
+mask_2015 <- 1-is.na(histogram_2015[[1]])
 mask_2018 <- 1-is.na(histogram_2018[[1]])
-mask_overall <- mask_2014*mask_2018
-histogram_2014 <- histogram_2014*mask_overall
+mask_overall <- mask_2015*mask_2018
+histogram_2015 <- histogram_2015*mask_overall
 histogram_2018 <- histogram_2018*mask_overall
 
 # Combine histogram values to one image (first two bands relate to min/max of histogram range...)
-histograms_combined <- stack(histogram_2014[[3:22]], histogram_2018[[3:22]])
+histograms_combined <- stack(histogram_2015[[3:22]], histogram_2018[[3:22]])
 
 # Sourced code for this part from obrl_soil answer at https://gis.stackexchange.com/questions/279535/pixel-correlations-from-two-raster-datasets-in-r
 
 # Function to generate correlation between 20 initial and 20 following values for a given pixel
 corvec <- function(vec = NULL) {
   cor(
-    # first LiDAR histogram (2014)
+    # first LiDAR histogram (2015)
     x      = vec[1:(length(vec)/2)],
     # second LiDAR histogram (2018)
     y      = vec[((length(vec)/2) + 1):length(vec)],
@@ -146,8 +180,14 @@ histogram_correlation <- calc(
   }
 )
 
-plot(corlyrs, zlim=c(0,1))
+plot(histogram_correlation, zlim=c(0,1))
 
-writeRaster(histogram_correlation, here::here("outputs","histogram_correlation.tif"))
+writeRaster(histogram_correlation, here::here("outputs","histogram_correlation.tif"), overwrite=TRUE)
+
+woodland_histogram_correlation <- mask(histogram_correlation, woodland)
+channel_histogram_correlation <- mask(histogram_correlation, channel)
+writeRaster(woodland_histogram_correlation, here::here("outputs","woodland_histogram_correlation"), overwrite=TRUE)
+writeRaster(channel_histogram_correlation, here::here("outputs","channel_histogram_correlation"), overwrite=TRUE)
 
 ```
+

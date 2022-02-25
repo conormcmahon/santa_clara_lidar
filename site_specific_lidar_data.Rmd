@@ -1,0 +1,83 @@
+---
+title: "Site Specific LiDAR Data"
+author: "Conor McMahon"
+date: "2/23/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(raster)
+
+```
+
+We're going to extract LiDAR statistics around nest points and survey points for both 2015 and 2018.
+
+First, we'll define some functions to get the height histogram in a local region around a point, and also a histogram of the CHM around each point. 
+
+```{r lidar_stat_functions, include=FALSE, warn=FALSE}
+{
+  
+  getNeighborhood <- function(input_image, point, buffer_radius)
+  {
+    point <- spTransform(point, crs(input_image))
+    masked_data <- raster::extract(input_image, point, buffer=buffer_radius)
+  }
+}
+
+```
+
+
+```{r load_rasters, include=FALSE}
+
+histogram_2015 <- stack(here::here("outputs","histogram_2015_mosaic.tif"))
+histogram_2018 <- stack(here::here("outputs","histogram_2018_mosaic.tif"))
+chm_2015 <- raster(here::here("outputs","chm_mosaic_2015_filtered.tif"))
+chm_2018 <- raster(here::here("outputs","chm_mosaic_2018_filtered.tif"))
+
+```
+
+
+
+Analyze survey points, using 50 m radii around each point:
+
+```{r nest_analysis, include=FALSE}
+
+#nest_locations <- read_csv(here::here("birds","HRNA_Taylor_nests_2015_2021.csv"))
+
+survey_points <- read_csv(here::here("birds","Point_count_station_list.csv"))
+coordinates(survey_points) <- ~Longitude+Latitude
+crs(survey_points) <- crs("+init=epsg:4326")
+
+# CHM Histograms in 2015
+survey_chm_histograms <- getNeighborhood(chm_2015, survey_points, buffer_radius = 50)
+chm_df <- data.frame()
+binLiDARReturns <- function(height_vector, min_height, max_height, bins, year, site)
+{
+  bin_breaks <- (1:bins)*(max_height-min_height)/bins
+  bin_starts <- (1:bins-1)*(max_height-min_height)/bins
+  histogram_df <- data.frame(height = height_vector, 
+                             bin_index = .bincode(height_vector, bin_breaks)) %>%
+    mutate(bin_start = bin_starts[bin_index],
+           bin_end = bin_breaks[bin_index]) %>%
+    group_by(bin_index) %>% 
+    summarize(count = n(),
+              bin_index = median(bin_index),
+              bin_start = median(bin_start),
+              bin_end = median(bin_end)) %>% 
+    mutate(year = rep(year, n()),
+           site = rep(site, n()))
+}
+
+  
+names(chm_hist_2015) <- survey_points$`Station #`
+
+
+```
+
+
+
+
+
