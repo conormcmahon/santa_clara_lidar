@@ -29,9 +29,11 @@ First, we'll define some functions to get the height histogram in a local region
 
 ```
 
+Load LiDAR data - both CHM rasters (including maximum height in each 1 m pixel) and histograms with all return values (including number of returns at various heights within each 10 m pixel).
 
 ```{r load_rasters, include=FALSE}
 
+# Load LiDAR raster data
 histogram_2015 <- stack(here::here("outputs","histogram_2015_mosaic.tif"))
 histogram_2018 <- stack(here::here("outputs","histogram_2018_mosaic.tif"))
 chm_2015 <- raster(here::here("outputs","chm_mosaic_2015_filtered.tif"))
@@ -40,26 +42,31 @@ chm_2018 <- raster(here::here("outputs","chm_mosaic_2018_filtered.tif"))
 ```
 
 
+Analyze survey points, using 50 m radii around each point. First we'll look only at maximum returns within each 1m pixel window:
 
-Analyze survey points, using 50 m radii around each point:
+```{r chm_analysis, include=FALSE}
 
-```{r nest_analysis, include=FALSE}
-
-#nest_locations <- read_csv(here::here("birds","HRNA_Taylor_nests_2015_2021.csv"))
-
+# Load and apply CRS to survey points (Lat/Lon values)
 survey_points <- read_csv(here::here("birds","Point_count_station_list.csv"))
 coordinates(survey_points) <- ~Longitude+Latitude
 crs(survey_points) <- crs("+init=epsg:4326")
 
-# CHM Histograms in 2015
-survey_chm_histograms <- getNeighborhood(chm_2015, survey_points, buffer_radius = 50)
-chm_df <- data.frame()
-binLiDARReturns <- function(height_vector, min_height, max_height, bins, year, site)
+# Get all CHM values within 50 m radius of each survey point
+#   In 2015:
+survey_max_returns_2015 <- getNeighborhood(chm_2015, survey_points, buffer_radius = 50)
+#   In 2018:
+survey_max_returns_2018 <- getNeighborhood(chm_2018, survey_points, buffer_radius = 50)
+
+# Bin to a histogram of maximum return height within each 1 m pixel in 50 m radius around a survey points
+binLiDARReturns <- function(height_vector, min_height, max_height, bins, year)
 {
+  # Upper end of each bin
   bin_breaks <- (1:bins)*(max_height-min_height)/bins
+  # Lower end of each bin
   bin_starts <- (1:bins-1)*(max_height-min_height)/bins
+  # Generate histogram data frame
   histogram_df <- data.frame(height = height_vector, 
-                             bin_index = .bincode(height_vector, bin_breaks)) %>%
+                             bin_index = .bincode(height_vector, bin_starts)) %>%
     mutate(bin_start = bin_starts[bin_index],
            bin_end = bin_breaks[bin_index]) %>%
     group_by(bin_index) %>% 
@@ -67,17 +74,138 @@ binLiDARReturns <- function(height_vector, min_height, max_height, bins, year, s
               bin_index = median(bin_index),
               bin_start = median(bin_start),
               bin_end = median(bin_end)) %>% 
-    mutate(year = rep(year, n()),
-           site = rep(site, n()))
+    mutate(year = rep(year, n()))
+  # Add normalized frequency
+  histogram_df$frequency <- histogram_df$count / sum(histogram_df$count)
+  return(histogram_df)
 }
 
-  
-names(chm_hist_2015) <- survey_points$`Station #`
+# Apply CHM (max height) binning function for each survey point
+#   In 2015:
+chm_histograms_2015 <- lapply(survey_max_returns_2015, binLiDARReturns, min_height=0, max_height=30, bins=15, year=2015) 
+#   In 2018:
+chm_histograms_2018 <- lapply(survey_max_returns_2018, binLiDARReturns, min_height=0, max_height=30, bins=15, year=2018)
+# The above are lists of data frames... add survey point labels to each data frame:
+for(ind in 1:length(chm_histograms_2015))
+{
+  chm_histograms_2015[[ind]]$site <- rep(survey_points[ind,]$`Station #`, nrow(chm_histograms_2015[[ind]]))
+  chm_histograms_2018[[ind]]$site <- rep(survey_points[ind,]$`Station #`, nrow(chm_histograms_2018[[ind]]))
+}
+# Combine list of dataframes to one dataframe
+chm_histograms_all <- rbind(bind_rows(chm_histograms_2015), bind_rows(chm_histograms_2018))
 
+# Generate plot of CHM histograms by site and year
+ggplot(chm_histograms_all) + 
+    theme_bw() +
+  theme(strip.background = element_rect(fill = 'gray80')) + 
+    geom_line(aes(x=bin_start, y=frequency, group=year, col=as.factor(year))) + 
+    facet_wrap(~site) + 
+    scale_x_continuous(limits=c(0,20)) + 
+    ggtitle("Histograms of Maximum LiDAR Returns by Year") + xlab("Height (m)") +
+    ylab("Frequency") + 
+    guides(col=guide_legend(title="Year"))
+
+```
+
+Now we want to repeat the above, but considering ALL returns, not just the highest ones:
+
+```{r all_returns_analysis, include=FALSE}
+
+# Get matrices where rows rows are pixels in the histogram image, columns are height bins, and cells are frequencies
+#    In 2015:
+hist_neighborhood_2015 <- getNeighborhood(histogram_2015, survey_points, buffer_radius = 50)
+#    In 2018
+hist_neighborhood_2018 <- getNeighborhood(histogram_2018, survey_points, buffer_radius = 50)
+# Convert the above to a list of height frequency averages across all neighbor pixels in image:
+collapseNeighborhood <- function(neighborhood)
+{
+  # Drop first two columns (which include min/max values in histogram), sum across pixels (columns)
+  num_bins <- ncol(neighborhood) - 2
+  frequency_sums <- as.numeric(colSums(neighborhood))[3:(num_bins+2)]
+  normalized_frequency <- frequency_sums / (sum(frequency_sums))
+  # Set up bin to height conversion
+  min_value <- median(neighborhood[,1])
+  max_value <- median(neighborhood[,2])
+  bin_breaks = (1:num_bins)*(max_value-min_value)/num_bins + min_value
+  bin_starts = (0:(num_bins-1))*(max_value-min_value)/num_bins + min_value
+  bin_indices = 1:num_bins
+  return ( data.frame(bin_start = bin_starts,
+                      bin_break = bin_breaks, 
+                      bin_index = bin_indices,
+                      frequency = normalized_frequency) )
+}
+return_frequencies_2015 <- lapply(hist_neighborhood_2015, collapseNeighborhood)
+return_frequencies_2018 <- lapply(hist_neighborhood_2018, collapseNeighborhood)
+# Add site information
+for(ind in 1:length(return_frequencies_2015))
+{
+  return_frequencies_2015[[ind]]$site <- rep(survey_points[ind,]$`Station #`, nrow(return_frequencies_2015[[ind]]))
+  return_frequencies_2015[[ind]]$year <- rep(2015, nrow(return_frequencies_2015[[ind]]))
+  return_frequencies_2018[[ind]]$site <- rep(survey_points[ind,]$`Station #`, nrow(return_frequencies_2018[[ind]]))
+  return_frequencies_2018[[ind]]$year <- rep(2018, nrow(return_frequencies_2015[[ind]]))
+}
+# Combine list of dataframes to one dataframe
+total_histograms_all <- rbind(bind_rows(return_frequencies_2015), bind_rows(return_frequencies_2018))
+
+# Replace 0 frequencies with NA to clarify graphs
+total_histograms_all[total_histograms_all$frequency == 0,]$frequency <- NA
+
+# Generate plot of all return values by site and year
+ggplot(total_histograms_all) + 
+    theme_bw() +
+  theme(strip.background = element_rect(fill = 'gray80')) + 
+    geom_line(aes(x=bin_start, y=frequency, group=year, col=as.factor(year))) + 
+    facet_wrap(~site) + 
+    scale_x_continuous(limits=c(0,20)) + 
+    ggtitle("Histograms of All LiDAR Returns by Year") + xlab("Height (m)") +
+    ylab("Frequency") + 
+    guides(col=guide_legend(title="Year"))
 
 ```
 
 
+Now lets do some comparisons to bird data:
+
+```{r bird_comparison, include=FALSE}
+
+birds <- rbind(read_csv(here::here("birds","SP_abundance_breeding_2015_2021.csv")),
+               read_csv(here::here("birds","SP_abundance_nonbreeding_2015_2021.csv"))) %>%
+  janitor::clean_names()
+# Bird sites use a different naming convention than survey points - correct here (e.g. PC-01 is SP 1)
+site_name_remapping <- c(paste("SP ",1:9,sep=""), paste("SP",10:15,sep=""))
+names(site_name_remapping) <- c(paste("PC-0",1:9,sep=""),paste("PC-",10:15,sep=""))
+birds$site <- as.character(site_name_remapping[birds$site_code])
+
+# Reformat histograms to be wide:
+chm_histograms_wide <- chm_histograms_all %>% 
+  dplyr::select(bin_index,frequency,year,site) %>%          # drop extra bin information
+  drop_na() %>%                                             
+  pivot_wider(names_from=bin_index, values_from=frequency)  # switch to wide format - bins as columns
+# Re-order columns so bins are in sensible order
+chm_histograms_wide <- chm_histograms_wide %>% 
+  dplyr::select(c(1,2,2+(order(as.numeric(colnames(chm_histograms_wide)[3:ncol(chm_histograms_wide)]))))) %>%
+  replace(is.na(.), 0)
+
+total_histograms_wide <- total_histograms_all %>% 
+  dplyr::select(bin_index,frequency,year,site) %>%          # drop extra bin information
+  drop_na() %>%                                             
+  pivot_wider(names_from=bin_index, values_from=frequency)  # switch to wide format - bins as columns
+# Re-order columns so bins are in sensible order
+total_histograms_wide <- total_histograms_wide %>% 
+  dplyr::select(c(1,2,2+(order(as.numeric(colnames(chm_histograms_wide)[3:ncol(total_histograms_wide)]))))) %>%
+  replace(is.na(.), 0)
+
+
+yewa_data <- birds %>% 
+  filter(year %in% c(2015, 2018),
+         species == "YEWA")
+
+bird_lidar_data <- merge(chm_histograms_wide, yewa_data, by=c("year","site"))
+names(bird_lidar_data)  <- c("site","year",
+                  paste("bin_",names(bird_lidar_data[3:16]),sep=""),
+                  "site_code", "species", "total_birds", "relative_abund_index")
+
+```
 
 
 

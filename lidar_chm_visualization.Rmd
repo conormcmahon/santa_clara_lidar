@@ -98,6 +98,8 @@ drought_change_df$chm_init <- pre_drought_chm_df$chm_init
 ggplot(drought_change_df) + 
   geom_histogram(aes(x=chm_change))
 
+writeRaster(drought_change, here::here("outputs","chm_change_overall.tif"))
+
 ```
 
 Compare change between sites
