@@ -75,6 +75,12 @@ post_drought_chm_5m <- aggregate_custom(post_drought_chm, pre_drought_chm_5m)
 pre_drought_mask <- pre_drought_chm_5m != 0
 post_drought_mask <- post_drought_chm_5m != 0
 
+pre_drought_chm_5m_masked <- mask(mask(mask(pre_drought_chm_5m, post_drought_chm_5m, maskvalue=0), post_drought_chm_5m), pre_drought_chm_5m, maskvalue=0)
+post_drought_chm_5m_masked <- mask(mask(mask(post_drought_chm_5m, pre_drought_chm_5m, maskvalue=0), pre_drought_chm_5m), post_drought_chm_5m, maskvalue=0)
+writeRaster(pre_drought_chm_5m_masked, here::here("outputs","chm_2015_5m.tif"))
+writeRaster(post_drought_chm_5m_masked, here::here("outputs","chm_2018_5m.tif"))
+
+
 # plot(pre_drought_chm_5m)
 # plot(post_drought_chm_5m)
 # plot(pre_drought_mask)
@@ -98,7 +104,7 @@ drought_change_df$chm_init <- pre_drought_chm_df$chm_init
 ggplot(drought_change_df) + 
   geom_histogram(aes(x=chm_change))
 
-writeRaster(drought_change, here::here("outputs","chm_change_overall.tif"))
+writeRaster(drought_change, here::here("outputs","chm_change_overall.tif"), overwrite=TRUE)
 
 ```
 
@@ -108,14 +114,20 @@ Compare change between sites
 
 ```{r site_level_change, echo=FALSE, warning=FALSE}
 
-woodland <- readOGR(here::here("boundaries","east_grove_woodland.shp"))
-channel <- readOGR(here::here("boundaries","channel_SCR.shp"))
+study_regions <- readOGR(here::here("boundaries","study_sites_feb25.shp"))
+woodland <- study_regions[study_regions$name == "Woodland",]
+channel <- study_regions[study_regions$name == "Channel",]
+restoration <- study_regions[study_regions$name == "Restoration",]
+#woodland <- readOGR(here::here("boundaries","east_grove_woodland.shp"))
+#hannel <- readOGR(here::here("boundaries","channel_SCR.shp"))
 
 channel_change <- mask(drought_change, channel)
 woodland_change <- mask(drought_change, woodland)
+restoration_change <- mask(drought_change, restoration)
 
-writeRaster(channel_change, here::here("outputs","channel_change"), overwrite=TRUE)
-writeRaster(woodland_change, here::here("outputs","woodland_change"), overwrite=TRUE)
+writeRaster(channel_change, here::here("outputs","channel_change.tif"), overwrite=TRUE)
+writeRaster(woodland_change, here::here("outputs","woodland_change.tif"), overwrite=TRUE)
+writeRaster(restoration_change, here::here("outputs","restoration_change.tif"), overwrite=TRUE)
 
 channel_change_df <- as.data.frame(channel_change, xy=TRUE) %>%
   drop_na() %>%
@@ -123,12 +135,35 @@ channel_change_df <- as.data.frame(channel_change, xy=TRUE) %>%
 woodland_change_df <- as.data.frame(woodland_change, xy=TRUE) %>%
   drop_na() %>%
   mutate(scene = rep("woodland", n()))
-change_df <- rbind(channel_change_df, woodland_change_df)
+restoration_change_df <- as.data.frame(restoration_change, xy=TRUE) %>%
+  drop_na() %>%
+  mutate(scene = rep("restoration", n()))
+change_df <- rbind(channel_change_df, woodland_change_df, restoration_change_df)
 
 ggplot(change_df) + 
   geom_histogram(aes(x=layer, group=scene, col=scene), bins=100) + 
   scale_x_continuous(limits=c(-30,15)) + 
-  scale_y_log10()
+  scale_y_log10() + 
+  ggtitle("CHM Change Across Entire Study Area")
+
+ggplot(channel_change_df) + 
+  geom_histogram(aes(x=layer, group=scene, col=scene), bins=100) + 
+  scale_x_continuous(limits=c(-30,15)) + 
+  scale_y_log10() + 
+  ggtitle("CHM Change along Channel")
+
+ggplot(woodland_change_df) + 
+  geom_histogram(aes(x=layer, group=scene, col=scene), bins=100) + 
+  scale_x_continuous(limits=c(-30,15)) + 
+  scale_y_log10() + 
+  ggtitle("CHM Change in Woodland")
+
+ggplot(restoration_change_df) + 
+  geom_histogram(aes(x=layer, group=scene, col=scene), bins=100) + 
+  scale_x_continuous(limits=c(-30,15)) + 
+  scale_y_log10() + 
+  ggtitle("CHM Change in Restored Area")
+
 
 
 ```
@@ -188,8 +223,137 @@ writeRaster(histogram_correlation, here::here("outputs","histogram_correlation.t
 
 woodland_histogram_correlation <- mask(histogram_correlation, woodland)
 channel_histogram_correlation <- mask(histogram_correlation, channel)
-writeRaster(woodland_histogram_correlation, here::here("outputs","woodland_histogram_correlation"), overwrite=TRUE)
-writeRaster(channel_histogram_correlation, here::here("outputs","channel_histogram_correlation"), overwrite=TRUE)
+restoration_histogram_correlation <- mask(histogram_correlation, restoration)
+writeRaster(woodland_histogram_correlation, here::here("outputs","woodland_histogram_correlation.tif"), overwrite=TRUE)
+writeRaster(channel_histogram_correlation, here::here("outputs","channel_histogram_correlation.tif"), overwrite=TRUE)
+writeRaster(restoration_histogram_correlation, here::here("outputs","restoration_histogram_correlation.tif"), overwrite=TRUE)
 
 ```
 
+
+Now we'll make violin plots showing before and after height conditions by region:
+
+
+```{r height_violin_plots, warning=FALSE}
+
+histogram_all <- crop(histogram_2015[[3:22]], histogram_2018)
+histogram_all <- stack(histogram_all, crop(histogram_2018[[3:22]], histogram_2015))
+histogram_all_df <- as.data.frame(histogram_all)
+
+makeBoxPlot <- function (histogram_data, site_mask, site_name)
+{
+  site_histogram <- as.data.frame(mask(crop(histogram_data, site_mask), site_mask, updatevalue=NA))
+  names(site_histogram) <- c(paste("bin_",1:20,sep=""),
+                             paste("bin_",1:20,sep=""))
+  site_histogram_pre <- site_histogram[,1:20]
+  site_histogram_post <- site_histogram[,21:40]
+  
+  site_histogram_pre_longer <- site_histogram_pre %>%
+    pivot_longer(1:20,names_to="name",values_to="frequency") %>%
+    mutate(site = rep(site_name, n()), 
+           year = 2015)
+  site_histogram_post_longer <- site_histogram_post %>%
+    pivot_longer(1:20,names_to="name",values_to="frequency") %>%
+    mutate(site = rep(site_name, n()), 
+           year = 2018)
+  
+  all_data <- rbind(site_histogram_pre_longer, 
+                    site_histogram_post_longer) %>%
+    drop_na() %>%
+    mutate(bin = as.numeric(substr(name, 5,10)))
+  
+  ggplot(data=all_data) + 
+    geom_boxplot(aes(y=frequency, x=bin*1.5, group=interaction(year,bin), col=as.factor(year)), outlier.alpha=0) + 
+    ylab("Height (m) ") + 
+    xlab("Frequency") +     guides(col=guide_legend(title="Year")) + 
+    ggtitle(paste("Height Histograms for ", site_name,sep="")) + 
+    scale_x_continuous(limits=c(0,20)) +
+    scale_y_continuous(limits=c(0,0.7))
+
+  all_data_summary <- all_data %>%
+    group_by(bin,year,site) %>%
+    summarize(median = median(frequency),
+              q1 = quantile(frequency, 0.25),
+              q3 = quantile(frequency, 0.75),
+              mean = mean(frequency)) 
+}
+
+
+woodland_values <- makeBoxPlot(histogram_all, woodland, "Woodland")
+channel_values <- makeBoxPlot(histogram_all, channel, "Channel")
+restoration_values <- makeBoxPlot(histogram_all, restoration, "Restoration")
+
+all_density_stats <- rbind(woodland_values,
+                           channel_values,
+                           restoration_values)
+
+ggplot(all_density_stats) + 
+    geom_line(aes(x=bin*1.5, y=median, group=year, col=as.factor(year))) + 
+    facet_wrap(~site)+ 
+    ylab("Height (m) ") + 
+    xlab("Change in Frequency") +     guides(col=guide_legend(title="Year")) + 
+    ggtitle("Vegetation Height Density") + 
+    scale_x_continuous(limits=c(0,20)) +
+    scale_y_continuous(limits=c(0,0.5))
+
+makeChangeBoxPlot <- function (histogram_data, site_mask, site_name)
+{
+  site_histogram <- as.data.frame(mask(crop(histogram_data, site_mask), site_mask, updatevalue=NA))
+  names(site_histogram) <- c(paste("bin_",1:20,sep=""),
+                             paste("bin_",1:20,sep=""))
+  
+  site_change_histogram <- (site_histogram[,21:40]-site_histogram[,1:20]) %>%
+    mutate(site = rep(site_name, n())) %>%
+    pivot_longer(1:20, names_to="name", values_to="frequency_change") %>%
+    mutate(bin = as.numeric(substr(name, 5,10))) %>% 
+    drop_na()
+  
+  testChangeSignificance <- function(target_bin)
+  {
+    change_test <- t.test((site_change_histogram %>% filter(bin==target_bin))$frequency_change)
+    return(change_test$p.value)
+  }
+  testChangeMagnitude <- function(target_bin)
+  {
+    change_test <- t.test((site_change_histogram %>% filter(bin==target_bin))$frequency_change)
+    return(change_test$estimate)
+  }
+  
+  print( unlist(lapply(1:20, FUN=testChangeSignificance))[1:12] )
+  print( ((unlist(lapply(1:20, FUN=testChangeSignificance))[1:12])<=0.01) * 1 )
+  print( unlist(lapply(1:20, FUN=testChangeMagnitude))[1:12] )
+  
+  print(
+    ggplot(data=site_change_histogram) + 
+      geom_boxplot(aes(y=frequency_change, x=bin*1.5, group=bin, ), outlier.alpha=0) + 
+      ylab("Height (m) ") + 
+      xlab("Change in Frequency") +     guides(col=guide_legend(title="Year")) + 
+      ggtitle(paste("Height Change for ", site_name,sep="")) + 
+      scale_x_continuous(limits=c(0,20)) +
+      scale_y_continuous(limits=c(-0.3,0.3))
+    )
+
+  return(as.numeric( unlist(lapply(1:20, FUN=testChangeMagnitude))[1:12] ))
+  
+}
+
+woodland_change <- makeChangeBoxPlot(histogram_all, woodland, "Woodland")
+channel_change <- makeChangeBoxPlot(histogram_all, channel, "Channel")
+restoration_change <- makeChangeBoxPlot(histogram_all, restoration, "Restoration")
+
+mean_change_df <- data.frame(channel = channel_change,
+                             woodland = woodland_change,
+                             restoration = restoration_change,
+                             bin = 1:length(channel_change)) %>%
+    pivot_longer(1:3, names_to="site", values_to="change")
+
+ggplot(mean_change_df) + 
+    geom_line(aes(x=bin*1.5, y=change, group=site, col=site)) + 
+    ylab("Change in Frequency") + 
+    xlab("Height (m)") +     
+    guides(col=guide_legend(title="Year")) + 
+    ggtitle("Height Change by Site") + 
+    scale_x_continuous(limits=c(0,20)) +
+    scale_y_continuous(limits=c(-0.05,0.1))
+
+```
